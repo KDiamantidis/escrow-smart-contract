@@ -116,7 +116,7 @@ test("Escrow: buyer can release and seller gets paid", async () => {
   const escrow = await Escrow.deploy(buyer.address);
   await escrow.waitForDeployment();
 
-  // 1) Buyer deposits 1 ETH
+  // Buyer deposits 1 ETH
   const depositTx = await escrow.connect(buyer).deposit({
     value: ethers.parseEther("1"),
   });
@@ -128,16 +128,16 @@ test("Escrow: buyer can release and seller gets paid", async () => {
   );
   assert.equal(balanceAfterDeposit, ethers.parseEther("1"));
 
-  // 2) Track seller balance BEFORE release
+  // Track seller balance BEFORE release
   const sellerBalanceBefore = BigInt(
     await ethers.provider.getBalance(seller.address)
   );
 
-  // 3) Release (called by buyer)
+  // Release (called by buyer)
   const releaseTx = await escrow.connect(buyer).release();
   const releaseReceipt = await releaseTx.wait();
 
-  // 4) Seller balance AFTER release
+  // Seller balance AFTER release
   const sellerBalanceAfter = BigInt(
     await ethers.provider.getBalance(seller.address)
   );
@@ -158,4 +158,114 @@ test("Escrow: buyer can release and seller gets paid", async () => {
 
   // (Optional sanity) receipt exists
   assert.ok(releaseReceipt);
+});
+
+test("Escrow: non-buyer cannot deposit", async () => {
+  const { ethers } = await network.connect();
+  const [seller, buyer] = await ethers.getSigners();
+
+  const Escrow = await ethers.getContractFactory("Escrow", seller);
+  const escrow = await Escrow.deploy(buyer.address);
+  await escrow.waitForDeployment();
+
+  // Seller tries to deposit (should fail because onlyBuyer)
+  await assert.rejects(
+    async () => {
+      const tx = await escrow.connect(seller).deposit({
+        value: ethers.parseEther("1"),
+      });
+      await tx.wait();
+    },
+    /Only buyer can call this/
+  );
+});
+
+test("Escrow: buyer cannot deposit twice", async () => {
+  const { ethers } = await network.connect();
+  const [seller, buyer] = await ethers.getSigners();
+
+  const Escrow = await ethers.getContractFactory("Escrow", seller);
+  const escrow = await Escrow.deploy(buyer.address);
+  await escrow.waitForDeployment();
+
+  // First deposit OK
+  const depositTx = await escrow.connect(buyer).deposit({
+    value: ethers.parseEther("1"),
+  });
+  await depositTx.wait();
+
+  // Second deposit should fail (state is not AWAITING_PAYMENT anymore)
+  await assert.rejects(
+    async () => {
+      const tx2 = await escrow.connect(buyer).deposit({
+        value: ethers.parseEther("1"),
+      });
+      await tx2.wait();
+    },
+    /Payment already made/
+  );
+});
+
+test("Escrow: buyer cannot refund before deposit", async () => {
+  const { ethers } = await network.connect();
+  const [seller, buyer] = await ethers.getSigners();
+
+  const Escrow = await ethers.getContractFactory("Escrow", seller);
+  const escrow = await Escrow.deploy(buyer.address);
+  await escrow.waitForDeployment();
+
+  // No deposit yet -> refund should fail due to wrong state
+  await assert.rejects(
+    async () => {
+      const tx = await escrow.connect(buyer).refund();
+      await tx.wait();
+    },
+    /Not refundable now/
+  );
+});
+
+test("Escrow: buyer cannot release before deposit", async () => {
+  const { ethers } = await network.connect();
+const [seller, buyer] = await ethers.getSigners();
+
+  const Escrow = await ethers.getContractFactory("Escrow", seller);
+  const escrow = await Escrow.deploy(buyer.address);
+  await escrow.waitForDeployment();
+
+  // No deposit yet -> release should fail
+  await assert.rejects(
+    async () => {
+      const tx = await escrow.connect(buyer).release();
+      await tx.wait();
+    },
+    /Not releasable now/
+  );
+});
+
+test("Escrow: buyer cannot refund after release", async () => {
+  const { ethers } = await network.connect();
+  const [seller, buyer] = await ethers.getSigners();
+
+  const Escrow = await ethers.getContractFactory("Escrow", seller);
+  const escrow = await Escrow.deploy(buyer.address);
+  await escrow.waitForDeployment();
+
+  // Deposit
+  const depositTx = await escrow.connect(buyer).deposit({
+    value: ethers.parseEther("1"),
+  });
+  await depositTx.wait();
+
+  // Release -> COMPLETE
+  const releaseTx = await escrow.connect(buyer).release();
+  await releaseTx.wait();
+
+  // Refund should now fail
+  await assert.rejects(
+    async () => {
+      const tx = await escrow.connect(buyer).refund();
+      await tx.wait();
+    },
+    /Not refundable now/
+  );
 });
