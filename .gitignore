@@ -1,20 +1,24 @@
-# Node modules
-/node_modules
+# Node dependencies
+node_modules/
 
-# Compilation output
-/dist
+# Hardhat compilation outputs
+cache/
+artifacts/
 
-# pnpm deploy output
-/bundle
+# TypeScript & TypeChain (Generated files)
+typechain/
+typechain-types/
 
-# Hardhat Build Artifacts
-/artifacts
+# Environment variables (CRITICAL: Never push private keys!)
+.env
+.env.*
 
-# Hardhat compilation (v2) support directory
-/cache
+# Coverage reports
+coverage/
+coverage.json
 
-# Typechain output
-/types
-
-# Hardhat coverage reports
-/coverage
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+*.swp
