@@ -213,11 +213,21 @@ const ScrollExpandMedia = ({
   const firstWord = title ? title.split(' ')[0] : '';
   const restOfTitle = title ? title.split(' ').slice(1).join(' ') : '';
 
-  const MODEL_W = isMobileState ? Math.min(viewportWidth * 0.82, 400) : 480;
-  const MODEL_H = isMobileState ? 360 : Math.min(viewportHeight * 0.82, 620);
+  const isCompactMobileViewport = isMobileState && viewportHeight < 760;
+  const MODEL_W = isMobileState
+    ? Math.min(viewportWidth * (isCompactMobileViewport ? 0.66 : 0.74), isCompactMobileViewport ? 290 : 340)
+    : 480;
+  const MODEL_H = isMobileState
+    ? Math.min(viewportHeight * (isCompactMobileViewport ? 0.42 : 0.5), isCompactMobileViewport ? 250 : 320)
+    : Math.min(viewportHeight * 0.82, 620);
   const modelXShift = isMobileState ? 0 : -scrollProgress * viewportWidth * 0.25;
+  const modelYShift = isMobileState
+    ? -Math.round(viewportHeight * (isCompactMobileViewport ? 0.22 : 0.15))
+    : 0;
   const modelTransformX = modelXShift - MODEL_W / 2;
-  const modelTransformY = -MODEL_H / 2;
+  const modelTransformY = -MODEL_H / 2 + modelYShift;
+  const effectiveModelRotationSpeed = isMobileState ? modelRotationSpeed * 0.75 : modelRotationSpeed;
+  const effectiveModelScale = isMobileState ? modelScale * 0.86 : modelScale;
   const titleOpacity = Math.max(0, Math.min(1, 1 - scrollProgress * 1.1));
   const escrowRevealT = showContent
     ? 1
@@ -331,8 +341,8 @@ const ScrollExpandMedia = ({
                 <div className="relative h-full w-full">
                   <HeroGltfCoin
                     modelSrc={mediaSrc}
-                    rotationSpeed={modelRotationSpeed}
-                    modelScale={modelScale}
+                    rotationSpeed={effectiveModelRotationSpeed}
+                    modelScale={effectiveModelScale}
                     metalPreset={modelMetalPreset}
                     onLoad={handleModelLoad}
                   />

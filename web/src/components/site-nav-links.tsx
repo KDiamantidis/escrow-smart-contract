@@ -15,6 +15,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/faq", label: "FAQ" },
   { href: "/contributors", label: "Contributors" },
   { href: "/explore", label: "Explore" },
+  { href: "/privacy", label: "Privacy" },
 ];
 
 interface SiteNavLinksProps {

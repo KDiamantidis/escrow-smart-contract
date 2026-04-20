@@ -81,7 +81,7 @@ export function EscrowHome() {
 
   useEffect(() => {
     const SESSION_KEY = "escrow_prefetch_done_v1";
-    const PREFETCH_ROUTES = ["/", "/how-it-works", "/faq", "/contributors", "/explore"];
+    const PREFETCH_ROUTES = ["/", "/how-it-works", "/faq", "/contributors", "/explore", "/privacy"];
 
     if (typeof window === "undefined") return;
     if (window.sessionStorage.getItem(SESSION_KEY) === "1") return;
@@ -198,6 +198,8 @@ export function EscrowHome() {
         mediaSrc="/models/ethereum-logo-3d.glb"
         title="Smart Contract"
         date="Ethereum"
+        modelRotationSpeed={0.8}
+        modelScale={0.96}
       >
         <div className="mx-auto max-w-3xl space-y-10 text-pretty pt-2">
           <header className="space-y-3">

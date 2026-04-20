@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { TwentyFirstToolbar } from "@21st-extension/toolbar-next";
 import { ReactPlugin } from "@21st-extension/react";
 import { Space_Grotesk, Space_Mono } from "next/font/google";
@@ -21,6 +21,12 @@ const spaceMono = Space_Mono({
 export const metadata: Metadata = {
   title: "Ethereum Escrow",
   description: "Sepolia escrow dApp — deploy, deposit, release, or refund",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({
