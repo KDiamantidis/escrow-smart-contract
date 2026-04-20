@@ -24,7 +24,7 @@ export function SiteMobileNav({ className }: SiteMobileNavProps) {
             type="button"
             variant="ghost"
             size="sm"
-            className={cn("md:hidden", className)}
+            className={cn("z-50 inline-flex shrink-0 md:hidden", className)}
             aria-label="Open navigation menu"
           />
         }

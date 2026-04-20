@@ -10,12 +10,13 @@ import {
   useDisconnect,
   useSwitchChain,
 } from "wagmi";
-import { sepolia } from "wagmi/chains";
+import { hardhat, sepolia } from "wagmi/chains";
 import { injected } from "wagmi/connectors";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
+import { SiteMobileNav } from "@/components/site-mobile-nav";
 import { SiteNavLinks } from "@/components/site-nav-links";
 import { chainMeta, truncateAddress } from "@/lib/chain-meta";
 import { SUPPORTED_CHAIN_IDS } from "@/lib/wagmi-config";
@@ -53,10 +54,10 @@ export function WalletStatusBar({
     }
   };
 
-  const onSwitch = async () => {
+  const onSwitch = async (targetChainId: number) => {
     setError(null);
     try {
-      await switchChainAsync({ chainId: sepolia.id });
+      await switchChainAsync({ chainId: targetChainId });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not switch network");
     }
@@ -74,16 +75,17 @@ export function WalletStatusBar({
       )}
       style={overlay ? { transform: "translateZ(0)", willChange: "transform" } : undefined}
     >
-      <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-2.5">
-        <div className="flex min-w-0 flex-1 items-center gap-4">
+      <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-2 px-3 py-2.5 sm:gap-3 sm:px-4">
+        <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-4">
           {leftSlot ?? (
             <Link
               href="/"
-              className="font-heading text-sm font-medium tracking-tight text-foreground/90 hover:text-foreground"
+              className="shrink-0 font-heading text-sm font-medium tracking-tight text-foreground/90 hover:text-foreground"
             >
               Escrow
             </Link>
           )}
+          <SiteMobileNav />
           <SiteNavLinks />
         </div>
 
@@ -91,27 +93,39 @@ export function WalletStatusBar({
           <Badge
             variant="outline"
             className="hidden gap-1.5 border-border/70 px-2 sm:inline-flex"
+            aria-label={`Network: ${meta.label}`}
           >
             <span className={cn("size-1.5 rounded-full", meta.dotClass)} aria-hidden />
-            <span className="text-[11px] font-medium">{meta.short}</span>
+            <span className="hidden text-[11px] font-medium sm:inline">{meta.short}</span>
           </Badge>
         )}
 
         {wrongChain && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={onSwitch}
-            disabled={isSwitching}
-            className="hidden sm:inline-flex"
-          >
-            {isSwitching ? "Switching…" : "Switch to Sepolia"}
-          </Button>
+          <div className="flex items-center gap-1.5">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onSwitch(sepolia.id)}
+              disabled={isSwitching}
+              className="h-8 px-2 text-xs sm:h-9 sm:px-3 sm:text-sm"
+            >
+              {isSwitching ? "Switching…" : "Sepolia"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onSwitch(hardhat.id)}
+              disabled={isSwitching}
+              className="h-8 px-2 text-xs sm:h-9 sm:px-3 sm:text-sm"
+            >
+              {isSwitching ? "Switching…" : "Hardhat"}
+            </Button>
+          </div>
         )}
 
         {isConnected ? (
           <div className="flex items-center gap-1.5">
-            <code className="hidden rounded-md bg-muted px-2 py-1 font-mono text-[11px] tracking-tight sm:inline-flex">
+            <code className="hidden rounded-md bg-muted px-2 py-1 font-mono text-[11px] tracking-tight md:inline-flex">
               {truncateAddress(address)}
             </code>
             {address && (
@@ -121,7 +135,7 @@ export function WalletStatusBar({
               variant="ghost"
               size="sm"
               onClick={() => disconnect()}
-              className="hidden sm:inline-flex"
+              className="h-8 px-2 text-xs sm:h-9 sm:px-3 sm:text-sm"
             >
               Disconnect
             </Button>
