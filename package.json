@@ -4,7 +4,13 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "hardhat test",
+    "compile": "hardhat compile",
+    "validate:web-env": "node scripts/validate-vercel-env.mjs",
+    "sync:deployment-env": "node scripts/sync-deployment-env.mjs",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "web:sync-abi": "npm --prefix web run sync:abi"
   },
   "keywords": [],
   "author": "",
@@ -14,6 +20,7 @@
     "@nomicfoundation/hardhat-ethers": "^4.0.4",
     "@nomicfoundation/hardhat-node-test-runner": "^3.0.8",
     "@types/node": "^22.19.7",
+    "dotenv": "^17.4.2",
     "ethers": "^6.16.0",
     "hardhat": "^3.1.5",
     "typescript": "~5.8.0"

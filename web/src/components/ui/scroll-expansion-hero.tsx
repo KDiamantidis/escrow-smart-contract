@@ -89,9 +89,11 @@ const ScrollExpandMedia = ({
   const handleModelLoad = () => setModelLoaded(true);
 
   useEffect(() => {
-    setScrollProgress(0);
-    setShowContent(false);
-    setMediaFullyExpanded(false);
+    queueMicrotask(() => {
+      setScrollProgress(0);
+      setShowContent(false);
+      setMediaFullyExpanded(false);
+    });
   }, [mediaType, mediaSrc]);
 
   useEffect(() => {

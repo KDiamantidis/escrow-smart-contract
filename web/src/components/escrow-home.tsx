@@ -3,17 +3,20 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, ExternalLink } from "lucide-react";
-import { decodeEventLog, isAddress } from "viem";
+import { BaseError, decodeErrorResult, decodeEventLog, isAddress } from "viem";
 import {
   useAccount,
   useChainId,
   useConnect,
   usePublicClient,
+  useSimulateContract,
+  useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
 import { injected } from "wagmi/connectors";
 
 import ScrollExpandMedia from "@/components/ui/scroll-expansion-hero";
+import { captureClientException } from "@/lib/sentry/capture-client";
 import { WalletStatusBar } from "@/components/wallet-status-bar";
 import {
   Alert,
@@ -34,13 +37,57 @@ import { escrowFactoryAbi } from "@/lib/escrow-artifact";
 import { SUPPORTED_CHAIN_IDS } from "@/lib/wagmi-config";
 import { LoadingScreen } from "@/components/ui/loading-screen";
 
+function extractRevertData(err: unknown): `0x${string}` | undefined {
+  let cur: unknown = err;
+  const seen = new Set<unknown>();
+  while (cur && typeof cur === "object" && !seen.has(cur)) {
+    seen.add(cur);
+    const o = cur as { data?: unknown; details?: unknown; cause?: unknown };
+    if (typeof o.data === "string" && /^0x[0-9a-fA-F]+$/.test(o.data)) {
+      return o.data as `0x${string}`;
+    }
+    if (typeof o.details === "string" && /^0x[0-9a-fA-F]+$/.test(o.details)) {
+      return o.details as `0x${string}`;
+    }
+    cur = o.cause;
+  }
+  return undefined;
+}
+
+function humanizeWriteError(err: unknown): string {
+  const data = extractRevertData(err);
+  if (data) {
+    try {
+      const decoded = decodeErrorResult({ abi: escrowFactoryAbi, data });
+      return decoded.errorName;
+    } catch {
+      // fall through
+    }
+  }
+  if (err instanceof BaseError) {
+    const m = err.shortMessage ?? err.message;
+    return /^0x[0-9a-fA-F]+$/.test(m.trim()) ? "Deploy failed." : m;
+  }
+  if (err instanceof Error) {
+    const m = err.message;
+    return /^0x[0-9a-fA-F]+$/.test(m.trim()) ? "Deploy failed." : m;
+  }
+  return "Deploy failed.";
+}
+
 export function EscrowHome() {
   const router = useRouter();
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { connectAsync, isPending: isConnecting } = useConnect();
   const publicClient = usePublicClient();
-  const { writeContractAsync, isPending: isDeploying } = useWriteContract();
+  const {
+    writeContract,
+    data: deployTxHash,
+    isPending: isDeployPending,
+    error: writeError,
+    reset: resetDeployWrite,
+  } = useWriteContract();
 
   const [sellerInput, setSellerInput] = useState("");
   const [arbiterInput, setArbiterInput] = useState("");
@@ -48,6 +95,7 @@ export function EscrowHome() {
   const [error, setError] = useState<string | null>(null);
   const [deployedAddress, setDeployedAddress] = useState<string | null>(null);
   const [showLoader, setShowLoader] = useState(false);
+  const [factoryReady, setFactoryReady] = useState<boolean>(false);
 
   const factoryAddress = process.env.NEXT_PUBLIC_FACTORY_ADDRESS as
     | `0x${string}`
@@ -79,14 +127,73 @@ export function EscrowHome() {
     return isAddress(openInput) ? null : "Not a valid contract address.";
   }, [openInput]);
 
+  const canUseFactory = useMemo(
+    () =>
+      !!factoryAddress &&
+      isAddress(factoryAddress) &&
+      !!address &&
+      isAddress(address) &&
+      SUPPORTED_CHAIN_IDS.includes(chainId) &&
+      !sellerError &&
+      !arbiterError &&
+      isAddress(sellerInput) &&
+      isAddress(arbiterInput) &&
+      factoryReady,
+    [
+      factoryAddress,
+      address,
+      chainId,
+      sellerError,
+      arbiterError,
+      sellerInput,
+      arbiterInput,
+      factoryReady,
+    ]
+  );
+
+  const createEscrowSim = useSimulateContract({
+    address:
+      factoryAddress && isAddress(factoryAddress)
+        ? factoryAddress
+        : "0x0000000000000000000000000000000000000000",
+    abi: escrowFactoryAbi,
+    functionName: "createEscrow",
+    args: [
+      isAddress(sellerInput)
+        ? (sellerInput as `0x${string}`)
+        : "0x0000000000000000000000000000000000000000",
+      isAddress(arbiterInput)
+        ? (arbiterInput as `0x${string}`)
+        : "0x0000000000000000000000000000000000000000",
+    ],
+    query: { enabled: canUseFactory },
+  });
+
+  const {
+    data: deployReceipt,
+    isLoading: isDeployConfirming,
+    isSuccess: isDeployConfirmed,
+  } = useWaitForTransactionReceipt({
+    hash: deployTxHash,
+  });
+  const isDeploying = isDeployPending || isDeployConfirming;
+
   useEffect(() => {
     const SESSION_KEY = "escrow_prefetch_done_v1";
-    const PREFETCH_ROUTES = ["/", "/how-it-works", "/faq", "/contributors", "/explore", "/privacy"];
+    const PREFETCH_ROUTES = [
+      "/",
+      "/how-it-works",
+      "/faq",
+      "/contributors",
+      "/explore",
+      "/privacy",
+      "/terms",
+    ];
 
     if (typeof window === "undefined") return;
     if (window.sessionStorage.getItem(SESSION_KEY) === "1") return;
 
-    setShowLoader(true);
+    queueMicrotask(() => setShowLoader(true));
 
     for (const route of PREFETCH_ROUTES) {
       router.prefetch(route);
@@ -100,17 +207,88 @@ export function EscrowHome() {
     return () => window.clearTimeout(closeTimer);
   }, [router]);
 
+  useEffect(() => {
+    if (!publicClient || !factoryAddress || !isAddress(factoryAddress)) {
+      queueMicrotask(() => setFactoryReady(false));
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const factoryCode = await publicClient.getBytecode({
+          address: factoryAddress,
+        });
+        if (!cancelled) setFactoryReady(!!factoryCode && factoryCode !== "0x");
+      } catch {
+        if (!cancelled) setFactoryReady(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [publicClient, factoryAddress, chainId]);
+
+  useEffect(() => {
+    if (!writeError) return;
+    captureClientException(writeError, { flow: "deploy_escrow_write", chainId });
+    queueMicrotask(() => setError(humanizeWriteError(writeError)));
+  }, [writeError, chainId]);
+
+  useEffect(() => {
+    const err = createEscrowSim.error;
+    if (!err) return;
+    captureClientException(err, { flow: "deploy_escrow_simulate", chainId });
+    queueMicrotask(() => setError(humanizeWriteError(err)));
+  }, [createEscrowSim.error, chainId]);
+
+  useEffect(() => {
+    if (!isDeployConfirmed || !deployReceipt) return;
+
+    let createdAddress: string | null = null;
+    for (const log of deployReceipt.logs) {
+      try {
+        const decoded = decodeEventLog({
+          abi: escrowFactoryAbi,
+          eventName: "EscrowCreated",
+          data: log.data,
+          topics: log.topics,
+        });
+        const escrow = decoded.args.escrow;
+        if (escrow && isAddress(escrow)) {
+          createdAddress = escrow;
+          break;
+        }
+      } catch {
+        // ignore unrelated logs
+      }
+    }
+
+    if (!createdAddress) {
+      queueMicrotask(() =>
+        setError("Deploy confirmed but EscrowCreated event was not found.")
+      );
+      return;
+    }
+
+    queueMicrotask(() => setDeployedAddress(createdAddress));
+    router.push(`/escrow/${createdAddress}`);
+  }, [isDeployConfirmed, deployReceipt, router]);
+
   const onConnect = async () => {
     setError(null);
     try {
       await connectAsync({ connector: injected() });
     } catch (e) {
+      captureClientException(e, { flow: "wallet_connect", chainId });
       setError(e instanceof Error ? e.message : "Could not connect wallet");
     }
   };
 
   const onDeploy = async () => {
     setError(null);
+    resetDeployWrite();
     if (!publicClient) {
       setError("No RPC client. Set NEXT_PUBLIC_RPC_URL in .env.local.");
       return;
@@ -127,11 +305,7 @@ export function EscrowHome() {
       setError("Set NEXT_PUBLIC_FACTORY_ADDRESS in web/.env.local.");
       return;
     }
-
-    const factoryCode = await publicClient.getBytecode({
-      address: factoryAddress,
-    });
-    if (!factoryCode || factoryCode === "0x") {
+    if (!factoryReady) {
       setError(
         `NEXT_PUBLIC_FACTORY_ADDRESS (${factoryAddress}) is not a deployed contract on this chain.`
       );
@@ -146,41 +320,15 @@ export function EscrowHome() {
       setError("Enter valid seller and arbiter addresses.");
       return;
     }
-    try {
-      const hash = await writeContractAsync({
-        address: factoryAddress,
-        abi: escrowFactoryAbi,
-        functionName: "createEscrow",
-        args: [sellerInput as `0x${string}`, arbiterInput as `0x${string}`],
-      });
-      const receipt = await publicClient.waitForTransactionReceipt({ hash });
-
-      let createdAddress: string | null = null;
-      for (const log of receipt.logs) {
-        try {
-          const decoded = decodeEventLog({
-            abi: escrowFactoryAbi,
-            data: log.data,
-            topics: log.topics,
-          });
-          if (decoded.eventName === "EscrowCreated") {
-            createdAddress = (decoded.args as { escrow: string }).escrow;
-            break;
-          }
-        } catch {
-          // ignore unrelated logs
-        }
-      }
-
-      if (!createdAddress) {
-        setError("Deploy confirmed but EscrowCreated event was not found.");
-        return;
-      }
-      setDeployedAddress(createdAddress);
-      router.push(`/escrow/${createdAddress}`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Deploy failed");
+    if (createEscrowSim.error) {
+      setError(humanizeWriteError(createEscrowSim.error));
+      return;
     }
+    if (!createEscrowSim.data?.request) {
+      setError("Deploy request is not ready yet. Try again in a moment.");
+      return;
+    }
+    writeContract(createEscrowSim.data.request);
   };
 
   const onOpenExisting = () => {
@@ -293,7 +441,9 @@ export function EscrowHome() {
                   <Button
                     onClick={onDeploy}
                     disabled={
-                      isDeploying ||
+                      !createEscrowSim.data ||
+                      isDeployPending ||
+                      isDeployConfirming ||
                       !sellerInput ||
                       !arbiterInput ||
                       !!sellerError ||
@@ -301,8 +451,16 @@ export function EscrowHome() {
                     }
                     className="w-full"
                   >
-                    {isDeploying ? "Deploying…" : "Deploy escrow"}
-                    {!isDeploying && <ArrowRight className="size-3.5" />}
+                    {isDeployPending
+                      ? "Check wallet…"
+                      : isDeployConfirming
+                        ? "Deploying…"
+                        : isDeployConfirmed
+                          ? "Redirecting…"
+                          : "Deploy Escrow"}
+                    {!isDeployPending && !isDeployConfirming && !isDeployConfirmed && (
+                      <ArrowRight className="size-3.5" />
+                    )}
                   </Button>
                 )}
                 <p className="text-xs text-muted-foreground">

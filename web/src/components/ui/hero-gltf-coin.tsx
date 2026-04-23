@@ -6,8 +6,6 @@ import { Suspense, useLayoutEffect, useRef } from "react";
 import { Color, MeshStandardMaterial } from "three";
 import type { Group, Material, Mesh, Texture } from "three";
 
-const SILVER_APPLIED_KEY = "__hero_gltf_silver_v3";
-
 function disposeMaterialMaps(material: Material): void {
   const keys = [
     "map",
@@ -47,12 +45,13 @@ function RotatingCoin({
   onLoad?: () => void;
 }) {
   const groupRef = useRef<Group>(null);
+  const silverMaterialAppliedRef = useRef(false);
   const { scene } = useGLTF(url);
 
   useLayoutEffect(() => {
     if (metalPreset === "silver") {
-      if (!scene.userData[SILVER_APPLIED_KEY]) {
-        scene.userData[SILVER_APPLIED_KEY] = true;
+      if (!silverMaterialAppliedRef.current) {
+        silverMaterialAppliedRef.current = true;
         scene.traverse((child) => {
           const mesh = child as Mesh;
           if (!mesh.isMesh) return;

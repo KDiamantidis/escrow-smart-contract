@@ -1,6 +1,12 @@
 # Node dependencies
 node_modules/
 
+# Compilation output
+dist/
+
+# pnpm deploy output
+bundle/
+
 # Hardhat compilation outputs
 cache/
 artifacts/
@@ -8,14 +14,21 @@ artifacts/
 # TypeScript & TypeChain (Generated files)
 typechain/
 typechain-types/
+types/
 
 # Environment variables (CRITICAL: Never push private keys!)
 .env
 .env.*
+web/.env.local
 
 # Coverage reports
 coverage/
 coverage.json
+
+# Next.js build outputs
+web/.next/
+web/node_modules/
+web/out/
 
 # IDE and OS files
 .vscode/

@@ -88,6 +88,48 @@ test("Escrow: initialize rejects duplicate addresses (e.g. buyer == seller)", as
   );
 });
 
+test("EscrowFactory: createEscrow rejects zero seller", async () => {
+  const { ethers } = await network.connect();
+  const [deployer, buyer, , arbiter] = await ethers.getSigners();
+
+  const Factory = await ethers.getContractFactory("EscrowFactory", deployer);
+  const factory: any = await Factory.deploy();
+  await factory.waitForDeployment();
+
+  await expectRevert(
+    () => factory.connect(buyer).createEscrow(ethers.ZeroAddress, arbiter.address),
+    "InvalidAddress"
+  );
+});
+
+test("EscrowFactory: createEscrow rejects zero arbiter", async () => {
+  const { ethers } = await network.connect();
+  const [deployer, buyer, seller] = await ethers.getSigners();
+
+  const Factory = await ethers.getContractFactory("EscrowFactory", deployer);
+  const factory: any = await Factory.deploy();
+  await factory.waitForDeployment();
+
+  await expectRevert(
+    () => factory.connect(buyer).createEscrow(seller.address, ethers.ZeroAddress),
+    "InvalidAddress"
+  );
+});
+
+test("EscrowFactory: createEscrow rejects buyer == arbiter (msg.sender)", async () => {
+  const { ethers } = await network.connect();
+  const [deployer, buyer, seller] = await ethers.getSigners();
+
+  const Factory = await ethers.getContractFactory("EscrowFactory", deployer);
+  const factory: any = await Factory.deploy();
+  await factory.waitForDeployment();
+
+  await expectRevert(
+    () => factory.connect(buyer).createEscrow(seller.address, buyer.address),
+    "InvalidAddress"
+  );
+});
+
 // § 2 – Deposit
 
 test("Escrow: buyer can deposit and state becomes AWAITING_DELIVERY", async () => {

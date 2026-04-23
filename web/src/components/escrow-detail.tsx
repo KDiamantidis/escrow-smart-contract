@@ -2,14 +2,17 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink } from "lucide-react";
-import { isAddress, parseEther } from "viem";
+import { BaseError, decodeErrorResult, isAddress, parseEther } from "viem";
 import {
   useAccount,
   useChainId,
-  usePublicClient,
   useReadContract,
+  useSimulateContract,
+  useSwitchChain,
+  useWaitForTransactionReceipt,
+  useWatchContractEvent,
   useWriteContract,
 } from "wagmi";
 import { sepolia } from "wagmi/chains";
@@ -32,6 +35,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { WalletStatusBar } from "@/components/wallet-status-bar";
 import { escrowAbi } from "@/lib/escrow-artifact";
 import { truncateAddress } from "@/lib/chain-meta";
+import { captureClientException } from "@/lib/sentry/capture-client";
 import { cn } from "@/lib/utils";
 import { useAssistantContext } from "@/components/assistant-context";
 
@@ -49,6 +53,79 @@ type ActionKey =
   | "dispute"
   | "resolveSeller"
   | "resolveBuyer";
+
+const TX_STATUS_LABELS: Record<ActionKey, string> = {
+  deposit: "Deposit",
+  release: "Release",
+  dispute: "Open dispute",
+  resolveSeller: "Resolve to seller",
+  resolveBuyer: "Resolve to buyer",
+};
+
+function extractRevertData(err: unknown): `0x${string}` | undefined {
+  let cur: unknown = err;
+  const seen = new Set<unknown>();
+  while (cur && typeof cur === "object" && !seen.has(cur)) {
+    seen.add(cur);
+    const o = cur as { data?: unknown; details?: unknown; cause?: unknown };
+    if (typeof o.data === "string" && /^0x[0-9a-fA-F]+$/.test(o.data)) {
+      return o.data as `0x${string}`;
+    }
+    if (typeof o.details === "string" && /^0x[0-9a-fA-F]+$/.test(o.details)) {
+      return o.details as `0x${string}`;
+    }
+    cur = o.cause;
+  }
+  return undefined;
+}
+
+function humanizeSimulateError(err: unknown): string {
+  const data = extractRevertData(err);
+  if (data) {
+    try {
+      const decoded = decodeErrorResult({ abi: escrowAbi, data });
+      return decoded.errorName;
+    } catch {
+      /* fall through */
+    }
+  }
+  if (err instanceof BaseError) {
+    const m = err.shortMessage ?? err.message;
+    return /^0x[0-9a-fA-F]+$/.test(m.trim())
+      ? "This transaction would revert on-chain."
+      : m;
+  }
+  if (err instanceof Error) {
+    const m = err.message;
+    return /^0x[0-9a-fA-F]+$/.test(m.trim())
+      ? "This transaction would revert on-chain."
+      : m;
+  }
+  return "This transaction would revert on-chain.";
+}
+
+function humanizeWriteError(err: unknown): string {
+  const data = extractRevertData(err);
+  if (data) {
+    try {
+      const decoded = decodeErrorResult({ abi: escrowAbi, data });
+      return decoded.errorName;
+    } catch {
+      /* fall through */
+    }
+  }
+  if (err instanceof BaseError) {
+    const m = err.shortMessage ?? err.message;
+    return /^0x[0-9a-fA-F]+$/.test(m.trim())
+      ? "Transaction failed."
+      : m;
+  }
+  if (err instanceof Error) {
+    const m = err.message;
+    return /^0x[0-9a-fA-F]+$/.test(m.trim()) ? "Transaction failed." : m;
+  }
+  return "Transaction failed.";
+}
 
 interface ActionConfig {
   title: string;
@@ -99,13 +176,14 @@ export function EscrowDetail() {
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
-  const publicClient = usePublicClient();
-  const { writeContractAsync, isPending: isWriting } = useWriteContract();
+  const wrongChain = isConnected && chainId !== sepolia.id;
+  const { switchChain, isPending: isSwitching } = useSwitchChain();
 
   const [depositEth, setDepositEth] = useState("0.01");
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<ActionKey | null>(null);
+  const lastTxLabelRef = useRef("");
 
   const validAddress = useMemo(
     () => isAddress(contractAddress),
@@ -114,65 +192,72 @@ export function EscrowDetail() {
 
   const escrowAddr = validAddress ? (contractAddress as `0x${string}`) : undefined;
 
-  const buyerQuery = useReadContract({
+  const {
+    data: buyerData,
+    refetch: refetchBuyer,
+    isLoading: isBuyerContractLoading,
+  } = useReadContract({
     address: escrowAddr,
     abi: escrowAbi,
     functionName: "buyer",
-    query: { enabled: !!escrowAddr },
+    query: {
+      enabled: !!escrowAddr && !wrongChain,
+      refetchInterval: 12_000,
+    },
   });
-  const sellerQuery = useReadContract({
+  const {
+    data: sellerData,
+    refetch: refetchSeller,
+    isLoading: isSellerContractLoading,
+  } = useReadContract({
     address: escrowAddr,
     abi: escrowAbi,
     functionName: "seller",
-    query: { enabled: !!escrowAddr },
+    query: {
+      enabled: !!escrowAddr && !wrongChain,
+      refetchInterval: 12_000,
+    },
   });
-  const arbiterQuery = useReadContract({
+  const {
+    data: arbiterData,
+    refetch: refetchArbiter,
+    isLoading: isArbiterContractLoading,
+  } = useReadContract({
     address: escrowAddr,
     abi: escrowAbi,
     functionName: "arbiter",
-    query: { enabled: !!escrowAddr },
+    query: {
+      enabled: !!escrowAddr && !wrongChain,
+      refetchInterval: 12_000,
+    },
   });
-  const stateQuery = useReadContract({
+  const {
+    data: stateData,
+    refetch: refetchState,
+    isLoading: isStateContractLoading,
+  } = useReadContract({
     address: escrowAddr,
     abi: escrowAbi,
     functionName: "state",
-    query: { enabled: !!escrowAddr },
+    query: {
+      enabled: !!escrowAddr && !wrongChain,
+      refetchInterval: 12_000,
+    },
   });
 
-  const buyer = buyerQuery.data as string | undefined;
-  const seller = sellerQuery.data as string | undefined;
-  const arbiter = arbiterQuery.data as string | undefined;
-  const state = stateQuery.data;
+  const buyer = buyerData as string | undefined;
+  const seller = sellerData as string | undefined;
+  const arbiter = arbiterData as string | undefined;
+  const state = stateData;
 
-  const refetchAll = async () => {
+  const refetchAll = useCallback(async () => {
     await Promise.all([
-      buyerQuery.refetch(),
-      sellerQuery.refetch(),
-      arbiterQuery.refetch(),
-      stateQuery.refetch(),
+      refetchBuyer(),
+      refetchSeller(),
+      refetchArbiter(),
+      refetchState(),
     ]);
-  };
-
-  const runTx = async (
-    label: string,
-    fn: () => Promise<`0x${string}`>
-  ) => {
-    if (!publicClient || !escrowAddr) return;
-    setError(null);
-    setStatus(`${label} pending — confirm in your wallet…`);
-    try {
-      const hash = await fn();
-      setStatus(`${label} broadcast. Waiting for confirmation…`);
-      await publicClient.waitForTransactionReceipt({ hash });
-      await refetchAll();
-      setStatus(`${label} confirmed.`);
-    } catch (e) {
-      setStatus(null);
-      setError(e instanceof Error ? e.message : "Transaction failed");
-    } finally {
-      setPendingAction(null);
-    }
-  };
+  }, [refetchBuyer, refetchSeller, refetchArbiter, refetchState]);
 
   const isBuyer =
     !!address && !!buyer && address.toLowerCase() === buyer.toLowerCase();
@@ -187,8 +272,6 @@ export function EscrowDetail() {
       ? STATE_LABELS[stateIdx]
       : "…";
 
-  const wrongChain = isConnected && chainId !== sepolia.id;
-
   const role: "buyer" | "seller" | "arbiter" | "observer" | "disconnected" =
     !isConnected
       ? "disconnected"
@@ -200,7 +283,252 @@ export function EscrowDetail() {
             ? "arbiter"
             : "observer";
 
+  const depositWei = useMemo(() => {
+    try {
+      return parseEther(depositEth || "0");
+    } catch {
+      return BigInt(0);
+    }
+  }, [depositEth]);
+
+  const fallbackAddr = "0x0000000000000000000000000000000000000000" as const;
+
+  const depositSimEnabled =
+    !!escrowAddr &&
+    !wrongChain &&
+    pendingAction === "deposit" &&
+    stateIdx === 0 &&
+    isBuyer &&
+    depositWei > BigInt(0);
+
+  const releaseSimEnabled =
+    !!escrowAddr &&
+    !wrongChain &&
+    pendingAction === "release" &&
+    stateIdx === 1 &&
+    isBuyer;
+
+  const disputeSimEnabled =
+    !!escrowAddr &&
+    !wrongChain &&
+    pendingAction === "dispute" &&
+    stateIdx === 1 &&
+    isBuyer;
+
+  const resolveSellerSimEnabled =
+    !!escrowAddr &&
+    !wrongChain &&
+    pendingAction === "resolveSeller" &&
+    stateIdx === 4 &&
+    isArbiter;
+
+  const resolveBuyerSimEnabled =
+    !!escrowAddr &&
+    !wrongChain &&
+    pendingAction === "resolveBuyer" &&
+    stateIdx === 4 &&
+    isArbiter;
+
+  const depositSim = useSimulateContract({
+    address: escrowAddr ?? fallbackAddr,
+    abi: escrowAbi,
+    functionName: "deposit",
+    value: depositWei,
+    query: { enabled: depositSimEnabled },
+  });
+
+  const releaseSim = useSimulateContract({
+    address: escrowAddr ?? fallbackAddr,
+    abi: escrowAbi,
+    functionName: "release",
+    query: { enabled: releaseSimEnabled },
+  });
+
+  const disputeSim = useSimulateContract({
+    address: escrowAddr ?? fallbackAddr,
+    abi: escrowAbi,
+    functionName: "initiateDispute",
+    query: { enabled: disputeSimEnabled },
+  });
+
+  const resolveSellerSim = useSimulateContract({
+    address: escrowAddr ?? fallbackAddr,
+    abi: escrowAbi,
+    functionName: "resolveDispute",
+    args: [false],
+    query: { enabled: resolveSellerSimEnabled },
+  });
+
+  const resolveBuyerSim = useSimulateContract({
+    address: escrowAddr ?? fallbackAddr,
+    abi: escrowAbi,
+    functionName: "resolveDispute",
+    args: [true],
+    query: { enabled: resolveBuyerSimEnabled },
+  });
+
+  const {
+    writeContract,
+    data: txHash,
+    isPending,
+    error: writeError,
+    reset: resetWrite,
+  } = useWriteContract();
+
+  const { isLoading: isConfirming, isSuccess: isConfirmed } =
+    useWaitForTransactionReceipt({
+      hash: txHash,
+    });
+
+  const txBusy = isPending || isConfirming;
+
+  useWatchContractEvent({
+    address: escrowAddr,
+    abi: escrowAbi,
+    eventName: "Deposited",
+    enabled: !!escrowAddr && !wrongChain,
+    onLogs: () => {
+      if (!txBusy) void refetchAll();
+    },
+  });
+  useWatchContractEvent({
+    address: escrowAddr,
+    abi: escrowAbi,
+    eventName: "DisputeInitiated",
+    enabled: !!escrowAddr && !wrongChain,
+    onLogs: () => {
+      if (!txBusy) void refetchAll();
+    },
+  });
+  useWatchContractEvent({
+    address: escrowAddr,
+    abi: escrowAbi,
+    eventName: "DisputeResolved",
+    enabled: !!escrowAddr && !wrongChain,
+    onLogs: () => {
+      if (!txBusy) void refetchAll();
+    },
+  });
+  useWatchContractEvent({
+    address: escrowAddr,
+    abi: escrowAbi,
+    eventName: "Initialized",
+    enabled: !!escrowAddr && !wrongChain,
+    onLogs: () => {
+      if (!txBusy) void refetchAll();
+    },
+  });
+  useWatchContractEvent({
+    address: escrowAddr,
+    abi: escrowAbi,
+    eventName: "Refunded",
+    enabled: !!escrowAddr && !wrongChain,
+    onLogs: () => {
+      if (!txBusy) void refetchAll();
+    },
+  });
+  useWatchContractEvent({
+    address: escrowAddr,
+    abi: escrowAbi,
+    eventName: "Released",
+    enabled: !!escrowAddr && !wrongChain,
+    onLogs: () => {
+      if (!txBusy) void refetchAll();
+    },
+  });
+  useWatchContractEvent({
+    address: escrowAddr,
+    abi: escrowAbi,
+    eventName: "TimeoutClaimed",
+    enabled: !!escrowAddr && !wrongChain,
+    onLogs: () => {
+      if (!txBusy) void refetchAll();
+    },
+  });
+
+  const pickSim = (key: ActionKey | null) => {
+    switch (key) {
+      case "deposit":
+        return depositSim;
+      case "release":
+        return releaseSim;
+      case "dispute":
+        return disputeSim;
+      case "resolveSeller":
+        return resolveSellerSim;
+      case "resolveBuyer":
+        return resolveBuyerSim;
+      default:
+        return null;
+    }
+  };
+
+  const activeSim = pendingAction ? pickSim(pendingAction) : null;
+  const simBusy = !!activeSim?.isFetching;
+  const dialogBusy = txBusy || simBusy;
+
   const { setDealContext, setSuggestions } = useAssistantContext();
+
+  useEffect(() => {
+    if (!pendingAction) return;
+    resetWrite();
+    setError(null);
+  }, [pendingAction, resetWrite]);
+
+  useEffect(() => {
+    if (!writeError) return;
+    captureClientException(writeError, { flow: "escrow_tx_write" });
+    setError(humanizeWriteError(writeError));
+    setStatus(null);
+    setPendingAction(null);
+    resetWrite();
+  }, [writeError, resetWrite]);
+
+  useEffect(() => {
+    if (!pendingAction) return;
+    const err =
+      pendingAction === "deposit"
+        ? depositSim.error
+        : pendingAction === "release"
+          ? releaseSim.error
+          : pendingAction === "dispute"
+            ? disputeSim.error
+            : pendingAction === "resolveSeller"
+              ? resolveSellerSim.error
+              : pendingAction === "resolveBuyer"
+                ? resolveBuyerSim.error
+                : undefined;
+    if (!err) return;
+    captureClientException(err, {
+      flow: "escrow_simulate",
+      action: pendingAction,
+    });
+    setError(humanizeSimulateError(err));
+  }, [
+    pendingAction,
+    depositSim.error,
+    releaseSim.error,
+    disputeSim.error,
+    resolveSellerSim.error,
+    resolveBuyerSim.error,
+  ]);
+
+  useEffect(() => {
+    if (!txHash) return;
+    const label = lastTxLabelRef.current;
+    setStatus(`${label} broadcast. Waiting for confirmation…`);
+  }, [txHash]);
+
+  useEffect(() => {
+    if (!isConfirmed) return;
+    const label = lastTxLabelRef.current;
+    void (async () => {
+      await refetchAll();
+      setStatus(`${label} confirmed.`);
+      setPendingAction(null);
+      resetWrite();
+    })();
+  }, [isConfirmed, refetchAll, resetWrite]);
 
   useEffect(() => {
     if (!validAddress) return;
@@ -275,73 +603,6 @@ export function EscrowDetail() {
     },
   };
 
-  const runAction = async (key: ActionKey) => {
-    if (!escrowAddr) return;
-    if (key === "deposit") {
-      let value: bigint;
-      try {
-        value = parseEther(depositEth || "0");
-      } catch {
-        setError("Invalid ETH amount.");
-        return;
-      }
-      if (value <= BigInt(0)) {
-        setError("Amount must be greater than zero.");
-        return;
-      }
-      await runTx("Deposit", () =>
-        writeContractAsync({
-          address: escrowAddr,
-          abi: escrowAbi,
-          functionName: "deposit",
-          value,
-        })
-      );
-      return;
-    }
-    if (key === "release") {
-      await runTx("Release", () =>
-        writeContractAsync({
-          address: escrowAddr,
-          abi: escrowAbi,
-          functionName: "release",
-        })
-      );
-      return;
-    }
-    if (key === "dispute") {
-      await runTx("Open dispute", () =>
-        writeContractAsync({
-          address: escrowAddr,
-          abi: escrowAbi,
-          functionName: "initiateDispute",
-        })
-      );
-      return;
-    }
-    if (key === "resolveSeller") {
-      await runTx("Resolve to seller", () =>
-        writeContractAsync({
-          address: escrowAddr,
-          abi: escrowAbi,
-          functionName: "resolveDispute",
-          args: [false],
-        })
-      );
-      return;
-    }
-    if (key === "resolveBuyer") {
-      await runTx("Resolve to buyer", () =>
-        writeContractAsync({
-          address: escrowAddr,
-          abi: escrowAbi,
-          functionName: "resolveDispute",
-          args: [true],
-        })
-      );
-    }
-  };
-
   if (!validAddress) {
     return (
       <div className="min-h-screen bg-background text-foreground">
@@ -383,7 +644,7 @@ export function EscrowDetail() {
             <h1 className="font-heading text-2xl font-semibold tracking-tight">
               Escrow deal
             </h1>
-            {stateQuery.isLoading ? (
+            {isStateContractLoading ? (
               <Skeleton className="h-5 w-28" />
             ) : (
               <Badge variant="outline">{stateLabel}</Badge>
@@ -421,17 +682,17 @@ export function EscrowDetail() {
             <AddressRow
               label="Buyer"
               value={buyer}
-              loading={buyerQuery.isLoading}
+              loading={isBuyerContractLoading}
             />
             <AddressRow
               label="Seller"
               value={seller}
-              loading={sellerQuery.isLoading}
+              loading={isSellerContractLoading}
             />
             <AddressRow
               label="Arbiter"
               value={arbiter}
-              loading={arbiterQuery.isLoading}
+              loading={isArbiterContractLoading}
             />
           </CardContent>
         </Card>
@@ -464,6 +725,15 @@ export function EscrowDetail() {
                   Switch your wallet to Sepolia using the top status bar to
                   interact with this contract.
                 </AlertDescription>
+                <div className="mt-3">
+                  <Button
+                    variant="destructive"
+                    disabled={isSwitching}
+                    onClick={() => switchChain({ chainId: sepolia.id })}
+                  >
+                    {isSwitching ? "Switching…" : "Switch to Sepolia"}
+                  </Button>
+                </div>
               </Alert>
             </CardContent>
           )}
@@ -479,14 +749,14 @@ export function EscrowDetail() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              {stateQuery.isLoading && (
+              {isStateContractLoading && (
                 <div className="space-y-3">
                   <Skeleton className="h-9 w-full" />
                   <Skeleton className="h-9 w-1/2" />
                 </div>
               )}
 
-              {!stateQuery.isLoading && stateIdx === 0 && (
+              {!isStateContractLoading && stateIdx === 0 && (
                 <div className="space-y-2">
                   <label
                     className="text-sm font-medium"
@@ -499,11 +769,11 @@ export function EscrowDetail() {
                     inputMode="decimal"
                     value={depositEth}
                     onChange={(e) => setDepositEth(e.target.value)}
-                    disabled={isWriting}
+                    disabled={txBusy}
                     className="font-mono"
                   />
                   <Button
-                    disabled={!isBuyer || isWriting || !depositEth}
+                    disabled={!isBuyer || txBusy || !depositEth}
                     onClick={() => setPendingAction("deposit")}
                   >
                     Deposit ETH
@@ -516,17 +786,17 @@ export function EscrowDetail() {
                 </div>
               )}
 
-              {!stateQuery.isLoading && stateIdx === 1 && (
+              {!isStateContractLoading && stateIdx === 1 && (
                 <div className="flex flex-col gap-3 sm:flex-row">
                   <Button
-                    disabled={!isBuyer || isWriting}
+                    disabled={!isBuyer || txBusy}
                     onClick={() => setPendingAction("release")}
                   >
                     Release to seller
                   </Button>
                   <Button
                     variant="destructive"
-                    disabled={!isBuyer || isWriting}
+                    disabled={!isBuyer || txBusy}
                     onClick={() => setPendingAction("dispute")}
                   >
                     Open dispute
@@ -539,17 +809,17 @@ export function EscrowDetail() {
                 </div>
               )}
 
-              {!stateQuery.isLoading && stateIdx === 4 && (
+              {!isStateContractLoading && stateIdx === 4 && (
                 <div className="flex flex-col gap-3 sm:flex-row">
                   <Button
-                    disabled={!isArbiter || isWriting}
+                    disabled={!isArbiter || txBusy}
                     onClick={() => setPendingAction("resolveSeller")}
                   >
                     Resolve to seller
                   </Button>
                   <Button
                     variant="secondary"
-                    disabled={!isArbiter || isWriting}
+                    disabled={!isArbiter || txBusy}
                     onClick={() => setPendingAction("resolveBuyer")}
                   >
                     Resolve to buyer
@@ -562,7 +832,7 @@ export function EscrowDetail() {
                 </div>
               )}
 
-              {!stateQuery.isLoading && (stateIdx === 2 || stateIdx === 3) && (
+              {!isStateContractLoading && (stateIdx === 2 || stateIdx === 3) && (
                 <p className="text-sm text-muted-foreground">
                   This escrow is finished ({stateLabel}). No further on-chain
                   actions are possible.
@@ -600,15 +870,104 @@ export function EscrowDetail() {
         <ConfirmDialog
           open={pendingAction !== null}
           onOpenChange={(open) => {
-            if (!open && !isWriting) setPendingAction(null);
+            if (!open && !txBusy) setPendingAction(null);
           }}
           title={dialogConfig.title}
           description={dialogConfig.description}
           confirmLabel={dialogConfig.confirmLabel}
           confirmVariant={dialogConfig.confirmVariant}
-          busy={isWriting}
+          busy={dialogBusy}
           onConfirm={() => {
-            if (pendingAction) void runAction(pendingAction);
+            if (!pendingAction || !escrowAddr) return;
+            if (pendingAction === "deposit") {
+              try {
+                const w = parseEther(depositEth || "0");
+                if (w <= BigInt(0)) {
+                  setError("Amount must be greater than zero.");
+                  return;
+                }
+              } catch {
+                setError("Invalid ETH amount.");
+                return;
+              }
+            }
+
+            const label = TX_STATUS_LABELS[pendingAction];
+
+            switch (pendingAction) {
+              case "deposit": {
+                if (
+                  depositSim.isFetching ||
+                  depositSim.error != null ||
+                  !depositSim.data?.request
+                ) {
+                  return;
+                }
+                lastTxLabelRef.current = label;
+                setError(null);
+                setStatus(`${label} pending — confirm in your wallet…`);
+                writeContract(depositSim.data.request);
+                break;
+              }
+              case "release": {
+                if (
+                  releaseSim.isFetching ||
+                  releaseSim.error != null ||
+                  !releaseSim.data?.request
+                ) {
+                  return;
+                }
+                lastTxLabelRef.current = label;
+                setError(null);
+                setStatus(`${label} pending — confirm in your wallet…`);
+                writeContract(releaseSim.data.request);
+                break;
+              }
+              case "dispute": {
+                if (
+                  disputeSim.isFetching ||
+                  disputeSim.error != null ||
+                  !disputeSim.data?.request
+                ) {
+                  return;
+                }
+                lastTxLabelRef.current = label;
+                setError(null);
+                setStatus(`${label} pending — confirm in your wallet…`);
+                writeContract(disputeSim.data.request);
+                break;
+              }
+              case "resolveSeller": {
+                if (
+                  resolveSellerSim.isFetching ||
+                  resolveSellerSim.error != null ||
+                  !resolveSellerSim.data?.request
+                ) {
+                  return;
+                }
+                lastTxLabelRef.current = label;
+                setError(null);
+                setStatus(`${label} pending — confirm in your wallet…`);
+                writeContract(resolveSellerSim.data.request);
+                break;
+              }
+              case "resolveBuyer": {
+                if (
+                  resolveBuyerSim.isFetching ||
+                  resolveBuyerSim.error != null ||
+                  !resolveBuyerSim.data?.request
+                ) {
+                  return;
+                }
+                lastTxLabelRef.current = label;
+                setError(null);
+                setStatus(`${label} pending — confirm in your wallet…`);
+                writeContract(resolveBuyerSim.data.request);
+                break;
+              }
+              default:
+                break;
+            }
           }}
         />
       )}

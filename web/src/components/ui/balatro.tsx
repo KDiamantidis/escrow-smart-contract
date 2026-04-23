@@ -215,27 +215,10 @@ export default function Balatro({
     const gl = renderer.gl;
     gl.clearColor(0, 0, 0, 1);
 
-    let program: Program;
     const initial = propsRef.current;
 
-    function resize() {
-      const c = containerRef.current;
-      if (!c) return;
-      renderer.setSize(c.offsetWidth, c.offsetHeight);
-      if (program) {
-        program.uniforms.iResolution.value = [
-          gl.canvas.width,
-          gl.canvas.height,
-          gl.canvas.width / gl.canvas.height,
-        ];
-      }
-    }
-
-    window.addEventListener("resize", resize);
-    resize();
-
     const geometry = new Triangle(gl);
-    program = new Program(gl, {
+    const program = new Program(gl, {
       vertex: vertexShader,
       fragment: fragmentShader,
       uniforms: {
@@ -263,6 +246,20 @@ export default function Balatro({
       },
     });
     programRef.current = program;
+
+    function resize() {
+      const c = containerRef.current;
+      if (!c) return;
+      renderer.setSize(c.offsetWidth, c.offsetHeight);
+      program.uniforms.iResolution.value = [
+        gl.canvas.width,
+        gl.canvas.height,
+        gl.canvas.width / gl.canvas.height,
+      ];
+    }
+
+    window.addEventListener("resize", resize);
+    resize();
 
     const mesh = new Mesh(gl, { geometry, program });
     let animationFrameId = 0;

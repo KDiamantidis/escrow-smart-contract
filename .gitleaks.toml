@@ -1,0 +1,14 @@
+title = "escrow-smart-contract gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Reduce noise for local dev paths"
+paths = [
+  '''node_modules''',
+  '''web/node_modules''',
+  '''\.next''',
+  '''cache''',
+  '''artifacts''',
+]

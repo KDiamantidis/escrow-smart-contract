@@ -366,7 +366,7 @@ export function AIAssistant() {
             }}
             className={cn(
               "fixed z-50 flex flex-col overflow-hidden rounded-2xl border border-border/70 bg-card/95 text-foreground shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] backdrop-blur-md",
-              "inset-x-3 bottom-3 max-h-[85dvh]",
+              "inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] max-h-[85dvh]",
               "sm:inset-auto sm:right-5 sm:bottom-24 sm:h-[34rem] sm:w-[23rem] sm:max-h-[75dvh]",
               "lg:right-6 lg:bottom-24 lg:h-[36rem] lg:w-[25rem]"
             )}
@@ -457,7 +457,7 @@ function Launcher({ open, onOpen }: { open: boolean; onOpen: () => void }) {
       transition={{ duration: 0.18, ease: "easeOut" }}
       style={{ pointerEvents: open ? "none" : "auto" }}
       className={cn(
-        "fixed right-5 bottom-5 z-50 inline-flex h-14 items-center gap-2 rounded-full border border-border/70 bg-card/95 px-4 pr-5 text-sm font-medium text-foreground shadow-[0_14px_40px_-14px_rgba(0,0,0,0.8)] backdrop-blur-md",
+        "fixed right-[max(1rem,env(safe-area-inset-right))] bottom-[max(1rem,env(safe-area-inset-bottom))] z-50 inline-flex h-14 items-center gap-2 rounded-full border border-border/70 bg-card/95 px-4 pr-5 text-sm font-medium text-foreground shadow-[0_14px_40px_-14px_rgba(0,0,0,0.8)] backdrop-blur-md",
         "hover:border-border hover:bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         "sm:right-6 sm:bottom-6"
       )}

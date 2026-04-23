@@ -7,6 +7,10 @@ import {
 } from "@/lib/assistant-prompt";
 import { checkInputSafety } from "@/lib/guardrails";
 import { rateLimit } from "@/lib/rate-limit";
+import { logServerEvent } from "@/lib/server-log";
+import { initServerSentry, Sentry } from "@/lib/sentry/server";
+
+initServerSentry();
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,7 +50,10 @@ function clientIp(req: NextRequest): string {
   );
 }
 
-function safetyStream(reply: string): Response {
+const PROVIDER_FALLBACK_MESSAGE =
+  "The assistant is temporarily unavailable. You can still use the dApp: connect the correct network, deploy with valid buyer/seller/arbiter addresses, deposit, then release or open a dispute if needed. Try the assistant again shortly.";
+
+function streamPlainText(reply: string, extraHeaders?: Record<string, string>): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -58,7 +65,7 @@ function safetyStream(reply: string): Response {
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
       "Cache-Control": "no-store, no-transform",
-      "X-Assistant-Guardrail": "1",
+      ...extraHeaders,
     },
   });
 }
@@ -80,6 +87,10 @@ export async function POST(req: NextRequest) {
     max: RATE_MAX_PER_WINDOW,
   });
   if (!limit.ok) {
+    logServerEvent("assistant", "rate_limit_block", {
+      ip: clientIp(req),
+      resetAt: limit.resetAt,
+    });
     return Response.json(
       {
         error:
@@ -132,7 +143,12 @@ export async function POST(req: NextRequest) {
   if (lastUser) {
     const verdict = checkInputSafety(lastUser.content);
     if (!verdict.safe) {
-      return safetyStream(verdict.assistantReply);
+      logServerEvent("assistant", "guardrail_block", {
+        reason: verdict.reason ?? "unsafe",
+      });
+      return streamPlainText(verdict.assistantReply, {
+        "X-Assistant-Guardrail": "1",
+      });
     }
   }
 
@@ -145,31 +161,50 @@ export async function POST(req: NextRequest) {
 
   messages.push(...trimmed);
 
-  const upstream = await fetch(GROQ_ENDPOINT, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: process.env.GROQ_MODEL || DEFAULT_MODEL,
-      messages,
-      temperature: 0.2,
-      max_tokens: 700,
-      stream: true,
-    }),
-  });
+  let upstream: Response;
+  try {
+    upstream = await fetch(GROQ_ENDPOINT, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: process.env.GROQ_MODEL || DEFAULT_MODEL,
+        messages,
+        temperature: 0.2,
+        max_tokens: 700,
+        stream: true,
+      }),
+    });
+  } catch (err) {
+    logServerEvent("assistant", "provider_fetch_error", {
+      kind: "network",
+      message: err instanceof Error ? err.message : String(err),
+    });
+    Sentry.captureException(
+      err instanceof Error ? err : new Error(String(err)),
+      { tags: { assistant: "provider_fetch" } }
+    );
+    return streamPlainText(PROVIDER_FALLBACK_MESSAGE, {
+      "X-Assistant-Fallback": "network",
+    });
+  }
 
   if (!upstream.ok || !upstream.body) {
     const detail = await upstream.text().catch(() => "");
-    return Response.json(
-      {
-        error: "Upstream error from the AI provider.",
-        status: upstream.status,
-        detail: detail.slice(0, 500),
-      },
-      { status: 502 }
-    );
+    logServerEvent("assistant", "provider_error", {
+      status: upstream.status,
+      detailLen: detail.length,
+    });
+    Sentry.captureMessage(`assistant_upstream_${upstream.status}`, {
+      level: "warning",
+      extra: { detailLen: detail.length },
+    });
+    return streamPlainText(PROVIDER_FALLBACK_MESSAGE, {
+      "X-Assistant-Fallback": "provider",
+      "X-Assistant-Upstream-Status": String(upstream.status),
+    });
   }
 
   /*
@@ -209,6 +244,10 @@ export async function POST(req: NextRequest) {
           }
         }
       } catch (err) {
+        Sentry.captureException(
+          err instanceof Error ? err : new Error("stream interrupted"),
+          { tags: { assistant: "stream" } }
+        );
         controller.enqueue(
           encoder.encode(
             `\n\n[assistant error: ${
